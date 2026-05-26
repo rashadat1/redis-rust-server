@@ -1,8 +1,12 @@
+mod log;
 use std::{
     fmt,
     io::Read,
     net::{TcpListener, TcpStream},
+    sync::mpsc,
 };
+
+use crate::log::init_logger;
 
 enum RedisError {
     IoError(std::io::Error),
@@ -29,7 +33,9 @@ impl fmt::Display for RedisError {
 }
 fn main() {
     let listener = TcpListener::bind("127.0.0.1:6379").unwrap();
+    let tx = init_logger();
     println!("[Redis Server] Server listening on port 6379");
+    tx.send("Server started".to_string()).unwrap();
     loop {
         match listener.accept() {
             Ok((socket, addr)) => {
@@ -37,17 +43,29 @@ fn main() {
                     "[Redis Server] Accepted new connection from {}",
                     addr.to_string()
                 );
-                match handle_connection(socket) {
+                tx.send(
+                    format!("Server accepted new connection from: {}", addr.to_string())
+                        .to_string(),
+                )
+                .unwrap();
+                match handle_connection(socket, tx.clone()) {
                     Ok(()) => {
                         println!(
                             "[Redis Server] Client request handled, closing connection with: {}",
                             addr.to_string()
+                        );
+                        tx.send(
+                            format!("Closed connection with client: {}", addr.to_string())
+                                .to_string(),
                         )
+                        .unwrap();
                     }
                     Err(redis) => {
                         println!("{}", redis);
+                        tx.send(format!("Error handling client request: {}", redis).to_string())
+                            .unwrap();
                     }
-                }
+                };
             }
             Err(e) => {
                 println!("[Redis Server] Error accepting connection exiting: {}", e)
@@ -64,7 +82,7 @@ fn parse_resp_array(
         command_args: Vec::new(),
     })
 }
-fn handle_connection(mut socket: TcpStream) -> Result<(), RedisError> {
+fn handle_connection(mut socket: TcpStream, tx: mpsc::Sender<String>) -> Result<(), RedisError> {
     let mut read_buf = vec![0u8; 1024];
     let mut accumulator: Vec<u8> = Vec::new();
     loop {
@@ -90,10 +108,14 @@ fn handle_connection(mut socket: TcpStream) -> Result<(), RedisError> {
                 curr += 1;
                 Ok(())
             }
-            _ => Err(RedisError::UnknownRESPDataType(
-                0,
-                String::from_utf8_lossy(&accumulator[..n]).to_string(),
-            )),
+            _ => {
+                let e = RedisError::UnknownRESPDataType(
+                    0,
+                    String::from_utf8_lossy(&accumulator[..n]).to_string(),
+                );
+                tx.send(format!("{}", e)).unwrap();
+                Err(e)
+            }
         };
     }
     Ok(())
