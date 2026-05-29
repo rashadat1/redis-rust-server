@@ -11,6 +11,9 @@ use crate::log::init_logger;
 enum RedisError {
     IoError(std::io::Error),
     UnknownRESPDataType(i32, String),
+    MalformedRequest(i32, String),
+    InvalidInteger(i32, String),
+    OutOfBytes,
 }
 enum CommandType {
     PING,
@@ -27,6 +30,22 @@ impl fmt::Display for RedisError {
             }
             RedisError::UnknownRESPDataType(pos, str) => {
                 write!(f, "Unknown RESP data type at position {} in: {}", pos, str)
+            }
+            RedisError::MalformedRequest(pos, str) => {
+                write!(f, "Malformed RESP request at position {} in: {}", pos, str)
+            }
+            RedisError::InvalidInteger(pos, str) => {
+                write!(
+                    f,
+                    "Invalid Integer in RESP request at position {} in: {}",
+                    pos, str
+                )
+            }
+            RedisError::OutOfBytes => {
+                write!(
+                    f,
+                    "Reached end of bytes in accumulator without hitting the end of the command"
+                )
             }
         }
     }
@@ -74,13 +93,87 @@ fn main() {
     }
 }
 fn parse_resp_array(
-    accumulator: &Vec<u8>,
-    mut curr_position: usize,
+    accumulator: &mut Vec<u8>,
+    pos: &mut usize,
 ) -> Result<ParsedCommand, RedisError> {
+    let mut command_args: Vec<String> = Vec::new();
+    let initial_position = *pos; // copy the position into another variable
+    loop {
+        // loop to deterine number of elements in the array
+        if let (Some(next), Some(next_next)) =
+            (accumulator.get(*pos + 1), accumulator.get(*pos + 2))
+        {
+            if *next == 0x0D && *next_next == 0x0A {
+                break;
+            }
+            *pos += 1;
+        } else {
+            Err(RedisError::OutOfBytes)?;
+        }
+    }
+    let num_element_bytes = &accumulator[initial_position..=*pos];
+    let num_elements_string = str::from_utf8(&num_element_bytes).map_err(|_| {
+        RedisError::MalformedRequest(
+            *pos as i32,
+            String::from_utf8_lossy(&accumulator).to_string(),
+        )
+    })?;
+    let num_elements = num_elements_string
+        .parse::<usize>()
+        .map_err(|_| RedisError::InvalidInteger(*pos as i32, num_elements_string.to_string()))?;
+
+    *pos += 3;
+    for _ in 0..num_elements {
+        if let Some(data_type_byte) = accumulator.get(*pos) {
+            match data_type_byte {
+                b'$' => {
+                    *pos += 1;
+                    let bulk_string = parse_bulk_string(accumulator, pos)?;
+                    command_args.push(bulk_string);
+                }
+                _ => Err(RedisError::UnknownRESPDataType(
+                    *pos as i32,
+                    String::from_utf8_lossy(&accumulator[initial_position..=*pos]).to_string(),
+                ))?,
+            };
+        };
+    }
     Ok(ParsedCommand {
-        command_name: "foo".to_string(),
-        command_args: Vec::new(),
+        command_name: command_args.get(0).unwrap().to_string(),
+        command_args: command_args,
     })
+}
+fn parse_bulk_string(accumulator: &mut Vec<u8>, pos: &mut usize) -> Result<String, RedisError> {
+    let current_position = *pos;
+    loop {
+        if let (Some(next), Some(next_next)) =
+            (accumulator.get(*pos + 1), accumulator.get(*pos + 2))
+        {
+            if *next == 0x0D && *next_next == 0x0A {
+                break;
+            }
+            *pos += 1;
+        }
+    }
+    let string_length_bytes = &accumulator[current_position..=*pos];
+    let string_length_string = str::from_utf8(string_length_bytes).map_err(|_| {
+        RedisError::MalformedRequest(
+            *pos as i32,
+            String::from_utf8_lossy(string_length_bytes).to_string(),
+        )
+    })?;
+    let string_length = string_length_string
+        .parse::<usize>()
+        .map_err(|_| RedisError::InvalidInteger(*pos as i32, string_length_string.to_string()))?;
+
+    *pos += 3; // $4\r\nbark\r\n
+    let bulk_string = str::from_utf8(&accumulator[*pos..(*pos + string_length)]).map_err(|_| {
+        RedisError::MalformedRequest(
+            *pos as i32,
+            String::from_utf8_lossy(&accumulator[*pos..(*pos + string_length)]).to_string(),
+        )
+    })?;
+    Ok(bulk_string.to_string())
 }
 fn handle_connection(mut socket: TcpStream, tx: mpsc::Sender<String>) -> Result<(), RedisError> {
     let mut read_buf = vec![0u8; 1024];
@@ -106,7 +199,7 @@ fn handle_connection(mut socket: TcpStream, tx: mpsc::Sender<String>) -> Result<
                 // Redis commands are serialized as arrays of bulk strings
                 // the data type byte for arrays is '*'
                 curr += 1;
-                Ok(())
+                parse_resp_array(&mut accumulator, &mut curr);
             }
             _ => {
                 let e = RedisError::UnknownRESPDataType(
@@ -114,7 +207,6 @@ fn handle_connection(mut socket: TcpStream, tx: mpsc::Sender<String>) -> Result<
                     String::from_utf8_lossy(&accumulator[..n]).to_string(),
                 );
                 tx.send(format!("{}", e)).unwrap();
-                Err(e)
             }
         };
     }
