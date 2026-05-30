@@ -10,16 +10,17 @@ use crate::log::init_logger;
 
 enum RedisError {
     IoError(std::io::Error),
-    UnknownRESPDataType(i32, String),
-    MalformedRequest(i32, String),
-    InvalidInteger(i32, String),
-    OutOfBytes,
+    UnknownRESPDataType(i32, String, Option<String>),
+    MalformedRequest(i32, String, Option<String>),
+    InvalidInteger(String, String, Option<String>),
+    OutOfBytes(String, Option<String>),
+    UnimplementedCommandType(String),
 }
 enum CommandType {
     PING,
 }
 struct ParsedCommand {
-    command_name: String,
+    command_name: CommandType,
     command_args: Vec<String>,
 }
 impl fmt::Display for RedisError {
@@ -28,24 +29,44 @@ impl fmt::Display for RedisError {
             RedisError::IoError(e) => {
                 write!(f, "IoError: {}", e)
             }
-            RedisError::UnknownRESPDataType(pos, str) => {
-                write!(f, "Unknown RESP data type at position {} in: {}", pos, str)
+            RedisError::UnknownRESPDataType(pos, str, msg) => {
+                if let Some(msg_) = msg {
+                    write!(f, "{} in: {} at {}", msg_, str, pos)
+                } else {
+                    write!(f, "Unknown RESP data type at position {} in: {}", pos, str)
+                }
             }
-            RedisError::MalformedRequest(pos, str) => {
-                write!(f, "Malformed RESP request at position {} in: {}", pos, str)
+            RedisError::MalformedRequest(pos, str, msg) => {
+                if let Some(msg_) = msg {
+                    write!(f, "{} in: {} at {}", msg_, str, pos)
+                } else {
+                    write!(f, "Malformed RESP request at position {} in: {}", pos, str)
+                }
             }
-            RedisError::InvalidInteger(pos, str) => {
-                write!(
-                    f,
-                    "Invalid Integer in RESP request at position {} in: {}",
-                    pos, str
-                )
+            RedisError::InvalidInteger(str, error_loc, msg) => {
+                if let Some(msg_) = msg {
+                    write!(f, "{} at: {} in {}", msg_, error_loc, str)
+                } else {
+                    write!(
+                        f,
+                        "Invalid Integer in RESP request at position {} in: {}",
+                        error_loc, str
+                    )
+                }
             }
-            RedisError::OutOfBytes => {
-                write!(
-                    f,
-                    "Reached end of bytes in accumulator without hitting the end of the command"
-                )
+            RedisError::OutOfBytes(str, msg) => {
+                if let Some(msg_) = msg {
+                    write!(f, "{}: As a string, the bytes read were: {}", msg_, str)
+                } else {
+                    write!(
+                        f,
+                        "Reached end of bytes in accumulator without hitting the end of the command: {}",
+                        str
+                    )
+                }
+            }
+            RedisError::UnimplementedCommandType(str) => {
+                write!(f, "Received Unimplemented RESP command: {}", str)
             }
         }
     }
@@ -63,8 +84,11 @@ fn main() {
                     addr.to_string()
                 );
                 tx.send(
-                    format!("Server accepted new connection from: {}", addr.to_string())
-                        .to_string(),
+                    format!(
+                        "\nServer accepted new connection from: {}",
+                        addr.to_string()
+                    )
+                    .to_string(),
                 )
                 .unwrap();
                 match handle_connection(socket, tx.clone()) {
@@ -74,7 +98,7 @@ fn main() {
                             addr.to_string()
                         );
                         tx.send(
-                            format!("Closed connection with client: {}", addr.to_string())
+                            format!("Closed connection with client: {}\n", addr.to_string())
                                 .to_string(),
                         )
                         .unwrap();
@@ -92,10 +116,7 @@ fn main() {
         }
     }
 }
-fn parse_resp_array(
-    accumulator: &mut Vec<u8>,
-    pos: &mut usize,
-) -> Result<ParsedCommand, RedisError> {
+fn parse_resp_array(accumulator: &mut Vec<u8>, pos: &mut usize) -> Result<Vec<String>, RedisError> {
     let mut command_args: Vec<String> = Vec::new();
     let initial_position = *pos; // copy the position into another variable
     loop {
@@ -108,7 +129,12 @@ fn parse_resp_array(
             }
             *pos += 1;
         } else {
-            Err(RedisError::OutOfBytes)?;
+            Err(RedisError::OutOfBytes(
+                String::from_utf8_lossy(&accumulator[..]).to_string(),
+                Some(
+                    "Out of Bytes Error: Reached end of command read from buffer before hitting a terminal CRLF, will try to read more bytes".to_string(),
+                ),
+            ))?;
         }
     }
     let num_element_bytes = &accumulator[initial_position..=*pos];
@@ -116,32 +142,43 @@ fn parse_resp_array(
         RedisError::MalformedRequest(
             *pos as i32,
             String::from_utf8_lossy(&accumulator).to_string(),
+            Some("Malformed Request Error: Invalid UTF8 string encoded by bytes representing number of elements in RESP array".to_string()),
         )
     })?;
     let num_elements = num_elements_string
         .parse::<usize>()
-        .map_err(|_| RedisError::InvalidInteger(*pos as i32, num_elements_string.to_string()))?;
+        .map_err(|_| RedisError::InvalidInteger(String::from_utf8_lossy(&accumulator[..accumulator.len()]).to_string(), num_elements_string.to_string(), Some("Invalid Integer Error: Expected an integer but received non-integer string in place denoting number of elements in RESP array".to_string())))?;
 
     *pos += 3;
-    for _ in 0..num_elements {
+    for i in 0..num_elements {
         if let Some(data_type_byte) = accumulator.get(*pos) {
             match data_type_byte {
                 b'$' => {
                     *pos += 1;
                     let bulk_string = parse_bulk_string(accumulator, pos)?;
+                    if i == 0 {
+                        command_args.push(bulk_string.to_ascii_uppercase()); // uppercase command
+                        // the first argument
+                    }
                     command_args.push(bulk_string);
                 }
                 _ => Err(RedisError::UnknownRESPDataType(
                     *pos as i32,
                     String::from_utf8_lossy(&accumulator[initial_position..=*pos]).to_string(),
+                    Some("Unknown RESP Data Type Error: RESP array contains an array element of invalid data type".to_string())
                 ))?,
             };
-        };
+        } else {
+            Err(RedisError::OutOfBytes(
+                String::from_utf8_lossy(&accumulator[..accumulator.len()]).to_string(),
+                Some(format!(
+                    "Out of Bytes Error: Reached end of bytes read from buffer into accumulator before processing expected number of RESP array elements ({})",
+                    num_elements
+                )),
+            ))?;
+        }
     }
-    Ok(ParsedCommand {
-        command_name: command_args.get(0).unwrap().to_string(),
-        command_args: command_args,
-    })
+    Ok(command_args)
 }
 fn parse_bulk_string(accumulator: &mut Vec<u8>, pos: &mut usize) -> Result<String, RedisError> {
     let current_position = *pos;
@@ -153,6 +190,12 @@ fn parse_bulk_string(accumulator: &mut Vec<u8>, pos: &mut usize) -> Result<Strin
                 break;
             }
             *pos += 1;
+        } else {
+            Err(RedisError::OutOfBytes(
+                String::from_utf8_lossy(&accumulator[..]).to_string(),
+                Some(
+                    "Out of Bytes Error: Reached end of command read from buffer before hitting a terminal CRLF, will try to read more bytes".to_string(),
+            )))?;
         }
     }
     let string_length_bytes = &accumulator[current_position..=*pos];
@@ -160,19 +203,22 @@ fn parse_bulk_string(accumulator: &mut Vec<u8>, pos: &mut usize) -> Result<Strin
         RedisError::MalformedRequest(
             *pos as i32,
             String::from_utf8_lossy(string_length_bytes).to_string(),
+            Some("Malformed Request Error: Invalid UTF8 string encoded by bytes representing number of elements in RESP bulk string".to_string()),
         )
     })?;
     let string_length = string_length_string
         .parse::<usize>()
-        .map_err(|_| RedisError::InvalidInteger(*pos as i32, string_length_string.to_string()))?;
+        .map_err(|_| RedisError::InvalidInteger(String::from_utf8_lossy(&accumulator[..accumulator.len()]).to_string(), string_length_string.to_string(), Some("Invalid Integer Error: Expected an integer but received non-integer string in place denoting number of elements in RESP bulk string".to_string())))?;
 
     *pos += 3; // $4\r\nbark\r\n
     let bulk_string = str::from_utf8(&accumulator[*pos..(*pos + string_length)]).map_err(|_| {
         RedisError::MalformedRequest(
             *pos as i32,
             String::from_utf8_lossy(&accumulator[*pos..(*pos + string_length)]).to_string(),
+            Some("Malformed Request Error: Invalid UTF8 string encoded by bytes representing RESP bulk string".to_string()),
         )
     })?;
+    *pos += string_length + 2;
     Ok(bulk_string.to_string())
 }
 fn handle_connection(mut socket: TcpStream, tx: mpsc::Sender<String>) -> Result<(), RedisError> {
@@ -199,14 +245,72 @@ fn handle_connection(mut socket: TcpStream, tx: mpsc::Sender<String>) -> Result<
                 // Redis commands are serialized as arrays of bulk strings
                 // the data type byte for arrays is '*'
                 curr += 1;
-                parse_resp_array(&mut accumulator, &mut curr);
+                let result = parse_resp_array(&mut accumulator, &mut curr);
+                match result {
+                    Err(RedisError::OutOfBytes(str, msg)) => {
+                        if let Some(msg_) = msg {
+                            tx.send(format!(
+                                "{}: Read the following bytes as a string: {}",
+                                msg_, str
+                            ))
+                            .unwrap_or_default();
+                        }
+                    }
+                    Err(e) => {
+                        tx.send(format!("{}", e)).unwrap_or_default();
+                        tx.send("Clearing accumulator".to_string())
+                            .unwrap_or_default();
+                        accumulator.clear();
+                        return Err(e.into());
+                    }
+                    Ok(parsed_command) => {
+                        accumulator.clear();
+                        if let None = parsed_command.get(0) {
+                            Err(RedisError::MalformedRequest(
+                                0,
+                                String::from_utf8_lossy(&accumulator[..accumulator.len()])
+                                    .to_string(),
+                                Some(
+                                    "Malformed Request Error: RESP Command lacks command name"
+                                        .to_string(),
+                                ),
+                            ))?;
+                        }
+                        println!("Received {} command", parsed_command[0]);
+                        tx.send("Registered PING command".to_string())
+                            .unwrap_or_default();
+                        let command_type = match parsed_command[0].as_str() {
+                            "PING" => CommandType::PING,
+                            _ => {
+                                let e =
+                                    RedisError::UnimplementedCommandType(parsed_command[0].clone());
+                                tx.send(format!("{}", e)).unwrap_or_default();
+                                Err(e.into())?
+                            }
+                        };
+                        let command = ParsedCommand {
+                            command_name: command_type,
+                            command_args: parsed_command,
+                        };
+                        // command executor
+                        // command responder
+                    }
+                }
             }
             _ => {
                 let e = RedisError::UnknownRESPDataType(
                     0,
                     String::from_utf8_lossy(&accumulator[..n]).to_string(),
+                    Some(
+                        "RESP Commands are expected to begin with '*' and hence be RESP arrays"
+                            .to_string(),
+                    ),
                 );
-                tx.send(format!("{}", e)).unwrap();
+                tx.send(format!(
+                    "{}, RESP Commands are expected to begin with '*'",
+                    e
+                ))
+                .unwrap_or_default();
             }
         };
     }
