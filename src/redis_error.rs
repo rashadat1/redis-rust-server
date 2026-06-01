@@ -1,4 +1,5 @@
 use std::fmt;
+#[derive(Debug)]
 pub enum RedisError {
     IoError(std::io::Error),
     UnknownRESPDataType(i32, String, Option<String>),

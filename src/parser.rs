@@ -46,8 +46,9 @@ pub fn parse_resp_array(
                     if i == 0 {
                         command_args.push(bulk_string.to_ascii_uppercase()); // uppercase command
                         // the first argument
+                    } else {
+                        command_args.push(bulk_string);
                     }
-                    command_args.push(bulk_string);
                 }
                 _ => Err(RedisError::UnknownRESPDataType(
                     *pos as i32,

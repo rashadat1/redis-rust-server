@@ -1,6 +1,8 @@
+mod executor;
 mod log;
 mod parser;
 mod redis_error;
+mod resp_serializer;
 use std::{
     io::Read,
     net::{TcpListener, TcpStream},
@@ -10,14 +12,10 @@ use std::{
 use crate::log::init_logger;
 use crate::parser::parse_resp_array;
 use crate::redis_error::RedisError;
-
-enum CommandType {
-    PING,
-}
-struct ParsedCommand {
-    command_name: CommandType,
-    command_args: Vec<String>,
-}
+use crate::{
+    executor::{Command, CommandType, command_executor},
+    resp_serializer::command_responder,
+};
 
 fn main() {
     let listener = TcpListener::bind("127.0.0.1:6379").unwrap();
@@ -124,6 +122,7 @@ fn handle_connection(mut socket: TcpStream, tx: mpsc::Sender<String>) -> Result<
                             .unwrap_or_default();
                         let command_type = match parsed_command[0].as_str() {
                             "PING" => CommandType::PING,
+                            "ECHO" => CommandType::ECHO,
                             _ => {
                                 let e =
                                     RedisError::UnimplementedCommandType(parsed_command[0].clone());
@@ -131,12 +130,17 @@ fn handle_connection(mut socket: TcpStream, tx: mpsc::Sender<String>) -> Result<
                                 Err(e.into())?
                             }
                         };
-                        let command = ParsedCommand {
+                        let command = Command {
                             command_name: command_type,
                             command_args: parsed_command,
                         };
-                        // command executor
-                        // command responder
+                        if let Err(e) = command_executor(command.clone()) {
+                            tx.send(format!("{}", e)).unwrap_or_default();
+                            // send Err back TODO
+                            Err(e.into())?
+                        }
+                        let response = command_executor(command).unwrap();
+                        command_responder(response, &mut socket);
                     }
                 }
             }
