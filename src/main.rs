@@ -3,11 +3,9 @@ mod log;
 mod parser;
 mod redis_error;
 mod resp_serializer;
-use std::{
-    io::Read,
-    net::{TcpListener, TcpStream},
-    sync::mpsc,
-};
+use tokio::io::AsyncReadExt;
+use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::mpsc;
 
 use crate::log::init_logger;
 use crate::parser::parse_resp_array;
@@ -16,14 +14,16 @@ use crate::{
     executor::{Command, CommandType, command_executor},
     resp_serializer::command_responder,
 };
-
-fn main() {
-    let listener = TcpListener::bind("127.0.0.1:6379").unwrap();
+#[tokio::main]
+async fn main() {
+    let listener = TcpListener::bind("127.0.0.1:6379").await.unwrap();
     let tx = init_logger();
     println!("[Redis Server] Server listening on port 6379");
-    tx.send("Server started".to_string()).unwrap();
+    tx.send("Server started".to_string())
+        .await
+        .unwrap_or_default();
     loop {
-        match listener.accept() {
+        match listener.accept().await {
             Ok((socket, addr)) => {
                 println!(
                     "[Redis Server] Accepted new connection from {}",
@@ -36,38 +36,50 @@ fn main() {
                     )
                     .to_string(),
                 )
-                .unwrap();
-                match handle_connection(socket, tx.clone()) {
-                    Ok(()) => {
-                        println!(
-                            "[Redis Server] Client request handled, closing connection with: {}",
-                            addr.to_string()
-                        );
-                        tx.send(
-                            format!("Closed connection with client: {}\n", addr.to_string())
-                                .to_string(),
-                        )
-                        .unwrap();
+                .await
+                .unwrap_or_default();
+                let mut tx2 = tx.clone();
+                tokio::spawn(async move {
+                    match handle_connection(socket, &mut tx2).await {
+                        Ok(()) => {
+                            println!(
+                                "[Redis Server] Client request handled, closing connection with: {}",
+                                addr.to_string()
+                            );
+                            tx2.send(
+                                format!("Closed connection with client: {}\n", addr.to_string())
+                                    .to_string(),
+                            )
+                            .await
+                            .unwrap_or_default();
+                        }
+                        Err(redis) => {
+                            eprintln!("{}", redis);
+                            tx2.send(
+                                format!("Error handling client request: {}", redis).to_string(),
+                            )
+                            .await
+                            .unwrap_or_default();
+                        }
                     }
-                    Err(redis) => {
-                        println!("{}", redis);
-                        tx.send(format!("Error handling client request: {}", redis).to_string())
-                            .unwrap();
-                    }
-                };
+                });
             }
             Err(e) => {
-                println!("[Redis Server] Error accepting connection exiting: {}", e)
+                eprintln!("[Redis Server] Error accepting connection exiting: {}", e)
             }
         }
     }
 }
-fn handle_connection(mut socket: TcpStream, tx: mpsc::Sender<String>) -> Result<(), RedisError> {
+async fn handle_connection(
+    mut socket: TcpStream,
+    tx: &mut mpsc::Sender<String>,
+) -> Result<(), RedisError> {
     let mut read_buf = vec![0u8; 1024];
     let mut accumulator: Vec<u8> = Vec::new();
     loop {
         let n = socket
             .read(&mut read_buf)
+            .await
             .map_err(|e| RedisError::IoError(e))?;
         println!("Read {} bytes from the stream", n);
         if n == 0 {
@@ -94,12 +106,14 @@ fn handle_connection(mut socket: TcpStream, tx: mpsc::Sender<String>) -> Result<
                                 "{}: Read the following bytes as a string: {}",
                                 msg_, str
                             ))
+                            .await
                             .unwrap_or_default();
                         }
                     }
                     Err(e) => {
-                        tx.send(format!("{}", e)).unwrap_or_default();
+                        tx.send(format!("{}", e)).await.unwrap_or_default();
                         tx.send("Clearing accumulator".to_string())
+                            .await
                             .unwrap_or_default();
                         accumulator.clear();
                         return Err(e.into());
@@ -119,6 +133,7 @@ fn handle_connection(mut socket: TcpStream, tx: mpsc::Sender<String>) -> Result<
                         }
                         println!("Received {} command", parsed_command[0]);
                         tx.send("Registered PING command".to_string())
+                            .await
                             .unwrap_or_default();
                         let command_type = match parsed_command[0].as_str() {
                             "PING" => CommandType::PING,
@@ -126,7 +141,7 @@ fn handle_connection(mut socket: TcpStream, tx: mpsc::Sender<String>) -> Result<
                             _ => {
                                 let e =
                                     RedisError::UnimplementedCommandType(parsed_command[0].clone());
-                                tx.send(format!("{}", e)).unwrap_or_default();
+                                tx.send(format!("{}", e)).await.unwrap_or_default();
                                 Err(e.into())?
                             }
                         };
@@ -135,12 +150,12 @@ fn handle_connection(mut socket: TcpStream, tx: mpsc::Sender<String>) -> Result<
                             command_args: parsed_command,
                         };
                         if let Err(e) = command_executor(command.clone()) {
-                            tx.send(format!("{}", e)).unwrap_or_default();
+                            tx.send(format!("{}", e)).await.unwrap_or_default();
                             // send Err back TODO
                             Err(e.into())?
                         }
                         let response = command_executor(command).unwrap();
-                        command_responder(response, &mut socket);
+                        let _ = command_responder(response, &mut socket).await;
                     }
                 }
             }
@@ -157,6 +172,7 @@ fn handle_connection(mut socket: TcpStream, tx: mpsc::Sender<String>) -> Result<
                     "{}, RESP Commands are expected to begin with '*'",
                     e
                 ))
+                .await
                 .unwrap_or_default();
             }
         };

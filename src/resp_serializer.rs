@@ -1,8 +1,8 @@
-use std::io::Write;
-use std::net::TcpStream;
 use crate::{executor::RedisResponse, redis_error::RedisError};
+use tokio::io::AsyncWriteExt;
+use tokio::net::TcpStream;
 
-pub fn command_responder(
+pub async fn command_responder(
     response: RedisResponse,
     socket: &mut TcpStream,
 ) -> Result<(), RedisError> {
@@ -10,6 +10,7 @@ pub fn command_responder(
     let response_bytes = serialized_response.as_bytes();
     socket
         .write(response_bytes)
+        .await
         .map_err(|e| RedisError::IoError(e))?;
     println!("Wrote {} bytes to the stream", response_bytes.len());
     Ok(())

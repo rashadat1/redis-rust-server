@@ -1,29 +1,21 @@
-use std::{
-    fs::OpenOptions,
-    io::{BufWriter, Write},
-    sync::mpsc,
-    thread,
-};
+use tokio::fs::OpenOptions;
+use tokio::io::AsyncWriteExt;
+use tokio::sync::mpsc;
 
 pub fn init_logger() -> mpsc::Sender<String> {
-    let (tx, rx) = mpsc::channel::<String>();
-    thread::spawn(move || {
-        let file = OpenOptions::new()
+    let (tx, mut rx) = mpsc::channel::<String>(1024);
+    tokio::spawn(async move {
+        let mut file = OpenOptions::new()
             .create(true)
             .append(true)
             .open("server.log")
+            .await
             .expect("failed to open log file");
-        let mut writer = BufWriter::new(file);
 
-        while let Ok(line) = rx.recv() {
-            if let Err(e) = writer.write_all(format!("{}\n", line).as_bytes()) {
-                eprintln!("Error writing log: {}", e);
-                continue;
-            }
-            writer.flush().unwrap();
+        while let Some(line) = rx.recv().await {
+            let _ = file.write_all(line.as_bytes()).await;
         }
+        let _ = file.flush().await;
     });
-
-    
     tx
 }

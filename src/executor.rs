@@ -14,9 +14,6 @@ pub enum RedisResponse {
     BulkString(String),
 }
 pub fn command_executor(command: Command) -> Result<RedisResponse, RedisError> {
-    for i in 0..command.command_args.len() {
-        println!("{}", command.command_args[i].to_string());
-    }
     let res = match command.command_name {
         CommandType::PING => RedisResponse::SimpleString(String::from("PONG")),
         CommandType::ECHO => {
