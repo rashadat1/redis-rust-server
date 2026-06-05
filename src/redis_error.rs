@@ -7,13 +7,16 @@ pub enum RedisError {
     InvalidInteger(String, String, Option<String>),
     OutOfBytes(String, Option<String>),
     UnimplementedCommandType(String),
+    MissingArumentForOption(String, String),
+    CommandMissingRequiredArguments(String, i32, i32),
+    UnrecognizedCommandOption(String, String),
 }
 
 impl fmt::Display for RedisError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             RedisError::IoError(e) => {
-                write!(f, "IoError: {}", e)
+                write!(f, "{}", e)
             }
             RedisError::UnknownRESPDataType(pos, str, msg) => {
                 if let Some(msg_) = msg {
@@ -53,6 +56,23 @@ impl fmt::Display for RedisError {
             }
             RedisError::UnimplementedCommandType(str) => {
                 write!(f, "Received Unimplemented RESP command: {}", str)
+            }
+            RedisError::MissingArumentForOption(cmd, option) => {
+                write!(
+                    f,
+                    "{} command has option {} specified but is missing a value for this option",
+                    cmd, option
+                )
+            }
+            RedisError::CommandMissingRequiredArguments(cmd, got, expect) => {
+                write!(
+                    f,
+                    "{} command received {} argument(s) but expected {} argument(s)",
+                    cmd, got, expect
+                )
+            }
+            RedisError::UnrecognizedCommandOption(cmd, option) => {
+                write!(f, "{} command received unrecognized option {}", cmd, option)
             }
         }
     }

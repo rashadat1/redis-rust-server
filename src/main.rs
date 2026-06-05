@@ -1,8 +1,10 @@
+mod data_store;
 mod executor;
 mod log;
 mod parser;
 mod redis_error;
 mod resp_serializer;
+
 use tokio::io::AsyncReadExt;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
@@ -11,6 +13,7 @@ use crate::log::init_logger;
 use crate::parser::parse_resp_array;
 use crate::redis_error::RedisError;
 use crate::{
+    data_store::KvStore,
     executor::{Command, CommandType, command_executor},
     resp_serializer::command_responder,
 };
@@ -18,6 +21,7 @@ use crate::{
 async fn main() {
     let listener = TcpListener::bind("127.0.0.1:6379").await.unwrap();
     let tx = init_logger();
+    let kv_store = KvStore::new();
     println!("[Redis Server] Server listening on port 6379");
     tx.send("Server started".to_string())
         .await
@@ -39,8 +43,9 @@ async fn main() {
                 .await
                 .unwrap_or_default();
                 let mut tx2 = tx.clone();
+                let kv_store2 = kv_store.clone();
                 tokio::spawn(async move {
-                    match handle_connection(socket, &mut tx2).await {
+                    match handle_connection(socket, &mut tx2, kv_store2).await {
                         Ok(()) => {
                             println!(
                                 "[Redis Server] Client request handled, closing connection with: {}",
@@ -73,6 +78,7 @@ async fn main() {
 async fn handle_connection(
     mut socket: TcpStream,
     tx: &mut mpsc::Sender<String>,
+    db: KvStore,
 ) -> Result<(), RedisError> {
     let mut read_buf = vec![0u8; 1024];
     let mut accumulator: Vec<u8> = Vec::new();
@@ -132,12 +138,14 @@ async fn handle_connection(
                             ))?;
                         }
                         println!("Received {} command", parsed_command[0]);
-                        tx.send("Registered PING command".to_string())
+                        tx.send(format!("Registered {} command", parsed_command[0]))
                             .await
                             .unwrap_or_default();
                         let command_type = match parsed_command[0].as_str() {
                             "PING" => CommandType::PING,
                             "ECHO" => CommandType::ECHO,
+                            "SET" => CommandType::SET,
+                            "GET" => CommandType::GET,
                             _ => {
                                 let e =
                                     RedisError::UnimplementedCommandType(parsed_command[0].clone());
@@ -149,12 +157,12 @@ async fn handle_connection(
                             command_name: command_type,
                             command_args: parsed_command,
                         };
-                        if let Err(e) = command_executor(command.clone()) {
+                        if let Err(e) = command_executor(command.clone(), db.clone()) {
                             tx.send(format!("{}", e)).await.unwrap_or_default();
                             // send Err back TODO
                             Err(e.into())?
                         }
-                        let response = command_executor(command).unwrap();
+                        let response = command_executor(command, db.clone()).unwrap();
                         let _ = command_responder(response, &mut socket).await;
                     }
                 }

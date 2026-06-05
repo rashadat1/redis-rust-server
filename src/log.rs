@@ -13,7 +13,7 @@ pub fn init_logger() -> mpsc::Sender<String> {
             .expect("failed to open log file");
 
         while let Some(line) = rx.recv().await {
-            let _ = file.write_all(line.as_bytes()).await;
+            let _ = file.write_all(format!("{}\r\n", line).as_bytes()).await;
         }
         let _ = file.flush().await;
     });
