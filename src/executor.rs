@@ -1,5 +1,5 @@
 use crate::{
-    data_store::{self, KvStore, SetOptionList, SetOptions},
+    data_store::{KvStore, SetOptionList, SetOptions},
     redis_error::RedisError,
 };
 #[derive(Clone)]
@@ -31,6 +31,7 @@ pub fn command_executor(command: Command, db: KvStore) -> Result<RedisResponse, 
             if let (Some(key), Some(value)) =
                 (command.command_args.get(1), command.command_args.get(2))
             {
+                // loop through the potential list of SET command options after the k-v pair
                 let mut index: usize = 3;
                 loop {
                     if let Some(option) = command.command_args.get(index) {
@@ -60,7 +61,7 @@ pub fn command_executor(command: Command, db: KvStore) -> Result<RedisResponse, 
                     0 => None,
                     _ => Some(opt),
                 };
-                db.set(key.to_string(), value.to_string(), set_opts);
+                let _ = db.set(key.to_string(), value.to_string(), set_opts);
                 RedisResponse::SimpleString(String::from("OK"))
             } else {
                 Err(RedisError::CommandMissingRequiredArguments(
