@@ -160,13 +160,15 @@ async fn handle_connection(
                             command_name: command_type,
                             command_args: parsed_command,
                         };
-                        if let Err(e) = command_executor(command.clone(), db.clone()) {
-                            tx.send(format!("{}", e)).await.unwrap_or_default();
-                            // send Err back TODO
-                            Err(e.into())?
+                        match command_executor(command.clone(), db.clone()) {
+                            Ok(response) => {
+                                let _ = command_responder(response, &mut socket).await;
+                            }
+                            Err(e) => {
+                                tx.send(format!("{}", e)).await.unwrap_or_default();
+                                Err(e.into())?
+                            }
                         }
-                        let response = command_executor(command, db.clone()).unwrap();
-                        let _ = command_responder(response, &mut socket).await;
                     }
                 }
             }

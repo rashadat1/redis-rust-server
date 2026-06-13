@@ -40,13 +40,21 @@ impl Store {
     }
     pub fn remove(&mut self, key: &String) {
         // &mut self so that the caller still owns the Store
-        self.kv.remove(key);
+        let val_removed = self.kv.remove(key);
+        if val_removed.is_none() {
+            return;
+        }
+        if val_removed.unwrap().expiry.is_none() {
+            return;
+        }
         let idx = self.index_map.get(key).unwrap().clone();
         let last_element = self.keys_with_expiry[self.keys_with_expiry.len() - 1].clone();
         self.keys_with_expiry.swap_remove(idx);
 
         self.index_map.remove(key);
-        self.index_map.insert(last_element.0, idx);
+        if idx < self.keys_with_expiry.len() - 1 {
+            self.index_map.insert(last_element.0, idx);
+        }
     }
     pub fn insert(&mut self, key: String, val: StoredVal, expiry: Option<Instant>) {
         self.kv.insert(key.clone(), val);
@@ -99,10 +107,10 @@ impl KvStore {
                             )
                         })?;
                         let curr_time = Instant::now();
-                        expiry = Some(curr_time + Duration::new(timeout, 0));
+                        expiry = Some(curr_time + Duration::from_secs(timeout));
                     }
                     SetOptions::PX(arg) => {
-                        let timeout = arg.parse::<u32>().map_err(|_| {
+                        let timeout = arg.parse::<u64>().map_err(|_| {
                             RedisError::InvalidArgumentForCommandOption(
                                 "SET".to_string(),
                                 "PX".to_string(),
@@ -111,7 +119,7 @@ impl KvStore {
                             )
                         })?;
                         let curr_time = Instant::now();
-                        expiry = Some(curr_time + Duration::new(0, timeout * 1_000_000))
+                        expiry = Some(curr_time + Duration::from_millis(timeout));
                     }
                 }
             }

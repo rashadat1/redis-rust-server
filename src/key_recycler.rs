@@ -28,6 +28,10 @@ fn active_cleanup_pass(kv_store: &KvStore) -> Vec<String> {
     }
     let mut k = 1;
     loop {
+        log_lines.push(format!(
+            "[Active Cleanup Pass] Stored keys with expiry has length: {}",
+            store.keys_with_expiry.len()
+        ));
         let (expired_keys_sample, share_expired) =
             sample_keys_loop(&store.keys_with_expiry, &mut log_lines);
         log_lines.push(format!(
