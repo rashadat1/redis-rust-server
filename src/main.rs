@@ -1,5 +1,6 @@
 mod data_store;
 mod executor;
+mod key_recycler;
 mod log;
 mod parser;
 mod redis_error;
@@ -9,6 +10,7 @@ use tokio::io::AsyncReadExt;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 
+use crate::key_recycler::key_recycler;
 use crate::log::init_logger;
 use crate::parser::parse_resp_array;
 use crate::redis_error::RedisError;
@@ -22,6 +24,7 @@ async fn main() {
     let listener = TcpListener::bind("127.0.0.1:6379").await.unwrap();
     let tx = init_logger();
     let kv_store = KvStore::new();
+    key_recycler(kv_store.clone(), tx.clone());
     println!("[Redis Server] Server listening on port 6379");
     tx.send("Server started".to_string())
         .await
