@@ -69,7 +69,7 @@ impl Store {
                 .insert(key.clone(), self.keys_with_expiry.len() - 1);
         }
     }
-    pub fn rpush(
+    pub fn push(
         &mut self,
         list_key: String,
         mut to_append: Vec<String>,
@@ -92,12 +92,9 @@ impl Store {
     pub fn lrange(
         &mut self,
         list_key: String,
-        start: usize,
-        stop: usize,
+        start_: i32,
+        stop_: i32,
     ) -> Result<Vec<String>, RedisError> {
-        if start > stop {
-            return Ok(Vec::new());
-        }
         let stored = match self.kv.get(&list_key) {
             None => return Ok(Vec::new()),
             Some(whole_list) => whole_list,
@@ -108,6 +105,11 @@ impl Store {
                 list_key
             )));
         };
+        let start = normalize_lrange_indices(start_, list.len() as i32);
+        let stop = normalize_lrange_indices(stop_, list.len() as i32);
+        if start > stop {
+            return Ok(Vec::new());
+        }
         if start >= list.len() {
             return Ok(Vec::new());
         }
@@ -186,17 +188,26 @@ impl KvStore {
         locked_ref.insert(key, new_stored_val, expiry);
         Ok(())
     }
-    pub fn rpush(&self, list_key: String, to_append: Vec<String>) -> Result<usize, RedisError> {
+    pub fn push(&self, list_key: String, to_append: Vec<String>) -> Result<usize, RedisError> {
         let mut locked_ref = self.db.lock().unwrap();
-        locked_ref.rpush(list_key, to_append)
+        locked_ref.push(list_key, to_append)
     }
     pub fn lrange(
         &self,
         list_key: String,
-        start: usize,
-        stop: usize,
+        start: i32,
+        stop: i32,
     ) -> Result<Vec<String>, RedisError> {
         let mut locked_ref = self.db.lock().unwrap();
         locked_ref.lrange(list_key, start, stop)
     }
+}
+fn normalize_lrange_indices(index: i32, cap: i32) -> usize {
+    return if index >= 0 {
+        index as usize
+    } else if index < -1 * cap {
+        0
+    } else {
+        (index + cap) as usize
+    };
 }

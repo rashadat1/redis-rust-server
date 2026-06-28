@@ -10,6 +10,7 @@ pub enum CommandType {
     GET,
     RPUSH,
     LRANGE,
+    LPUSH,
 }
 #[derive(Clone)]
 pub struct Command {
@@ -106,7 +107,7 @@ pub fn command_executor(command: Command, db: KvStore) -> Result<RedisResponse, 
                         break;
                     }
                 }
-                match db.rpush(list_key.to_string(), to_append) {
+                match db.push(list_key.to_string(), to_append) {
                     Ok(len_list) => RedisResponse::Integer(len_list as i32),
                     Err(e) => Err(e)?,
                 }
@@ -125,13 +126,13 @@ pub fn command_executor(command: Command, db: KvStore) -> Result<RedisResponse, 
                 command.command_args.get(2),
                 command.command_args.get(3),
             ) {
-                let start = start_str.parse::<usize>().map_err(|_| {
+                let start = start_str.parse::<i32>().map_err(|_| {
                     RedisError::WrongType(format!(
                         "LRANGE command argument 2 (start): {} cannot be parsed as an integer",
                         start_str
                     ))
                 })?;
-                let stop = stop_str.parse::<usize>().map_err(|_| {
+                let stop = stop_str.parse::<i32>().map_err(|_| {
                     RedisError::WrongType(format!(
                         "LRANGE command arument 3 (stop): {} cannot be parsed as an integer",
                         stop_str
@@ -148,6 +149,32 @@ pub fn command_executor(command: Command, db: KvStore) -> Result<RedisResponse, 
                     (command.command_args.len() - 1) as i32,
                     3,
                 ))?
+            }
+        }
+        CommandType::LPUSH => {
+            let mut to_append: Vec<String> = Vec::new();
+            let cmd_name = command.command_args[0].clone();
+            let list_key = match command.command_args.get(1) {
+                None => Err(RedisError::CommandMissingRequiredArguments(
+                    cmd_name,
+                    (command.command_args.len() - 1) as i32,
+                    1,
+                ))?,
+                Some(x) => x,
+            };
+            let mut i = 2;
+            loop {
+                if let Some(el) = command.command_args.get(i) {
+                    to_append.push(el.to_string());
+                    i += 1;
+                } else {
+                    break;
+                }
+            }
+            to_append.reverse();
+            match db.push(list_key.to_string(), to_append) {
+                Ok(len_list) => RedisResponse::Integer(len_list as i32),
+                Err(e) => Err(e)?,
             }
         }
     };
