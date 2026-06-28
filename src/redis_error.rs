@@ -11,6 +11,7 @@ pub enum RedisError {
     CommandMissingRequiredArguments(String, i32, i32),
     UnrecognizedCommandOption(String, String),
     InvalidArgumentForCommandOption(String, String, String, String),
+    WrongType(String)
 }
 
 impl fmt::Display for RedisError {
@@ -81,6 +82,9 @@ impl fmt::Display for RedisError {
                     "{} command option {} expects an {} got value: {} which cannot be parsed as an {}",
                     cmd, option, expected_type, got, expected_type
                 )
+            }
+            RedisError::WrongType(msg) => {
+                write!(f, "{}", msg)
             }
         }
     }

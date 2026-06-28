@@ -20,5 +20,6 @@ fn resp_serializer(response: RedisResponse) -> String {
         RedisResponse::SimpleString(str) => format!("+{}\r\n", str),
         RedisResponse::BulkString(str) => format!("${}\r\n{}\r\n", str.len(), str),
         RedisResponse::NullBulkString => String::from("$-1\r\n"),
+        RedisResponse::Integer(int) => format!(":{}\r\n", int)
     }
 }

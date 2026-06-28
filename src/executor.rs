@@ -1,5 +1,5 @@
 use crate::{
-    data_store::{KvStore, SetOptionList, SetOptions},
+    data_store::{KvStore, RedisValue, SetOptionList, SetOptions},
     redis_error::RedisError,
 };
 #[derive(Clone)]
@@ -8,6 +8,7 @@ pub enum CommandType {
     ECHO,
     SET,
     GET,
+    RPUSH,
 }
 #[derive(Clone)]
 pub struct Command {
@@ -18,6 +19,7 @@ pub enum RedisResponse {
     SimpleString(String),
     BulkString(String),
     NullBulkString,
+    Integer(i32),
 }
 pub fn command_executor(command: Command, db: KvStore) -> Result<RedisResponse, RedisError> {
     let res = match command.command_name {
@@ -75,8 +77,36 @@ pub fn command_executor(command: Command, db: KvStore) -> Result<RedisResponse, 
             let cmd_name = &command.command_args[0];
             if let Some(key) = command.command_args.get(1) {
                 match db.get(key.to_string()) {
-                    Some(value) => RedisResponse::BulkString(value),
+                    Some(value) => match value {
+                        RedisValue::StringVal(str) => RedisResponse::BulkString(str),
+                        RedisValue::ListVal(_) => RedisResponse::NullBulkString,
+                    },
                     None => RedisResponse::NullBulkString,
+                }
+            } else {
+                Err(RedisError::CommandMissingRequiredArguments(
+                    cmd_name.to_string(),
+                    0,
+                    1,
+                ))?
+            }
+        }
+        CommandType::RPUSH => {
+            let mut to_append: Vec<String> = Vec::new();
+            let cmd_name = &command.command_args[0];
+            if let Some(list_key) = command.command_args.get(1) {
+                let mut i = 2;
+                loop {
+                    if let Some(el) = command.command_args.get(i) {
+                        to_append.push(el.to_string());
+                        i += 1;
+                    } else {
+                        break;
+                    }
+                }
+                match db.rpush(list_key.to_string(), to_append) {
+                    Ok(len_list) => RedisResponse::Integer(len_list as i32),
+                    Err(e) => Err(e)?,
                 }
             } else {
                 Err(RedisError::CommandMissingRequiredArguments(

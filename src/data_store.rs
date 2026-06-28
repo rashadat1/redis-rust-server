@@ -7,8 +7,13 @@ use std::{
 use crate::redis_error::RedisError;
 #[derive(Clone)]
 pub struct StoredVal {
-    pub val: String,
+    pub val: RedisValue,
     pub expiry: Option<Instant>,
+}
+#[derive(Clone)]
+pub enum RedisValue {
+    StringVal(String),
+    ListVal(Vec<String>),
 }
 #[derive(Clone)]
 pub struct Store {
@@ -64,13 +69,33 @@ impl Store {
                 .insert(key.clone(), self.keys_with_expiry.len() - 1);
         }
     }
+    pub fn rpush(
+        &mut self,
+        list_key: String,
+        mut to_append: Vec<String>,
+    ) -> Result<usize, RedisError> {
+        let list_val = self.kv.entry(list_key.clone()).or_insert(StoredVal {
+            val: RedisValue::ListVal(Vec::new()),
+            expiry: None,
+        });
+        match &mut list_val.val {
+            RedisValue::StringVal(_) => Err(RedisError::WrongType(format!(
+                "Key: {} already exists in kv store and the value for the key is a String. For existing keys, RPUSH requires the value be a list",
+                list_key
+            ))),
+            RedisValue::ListVal(list) => {
+                list.append(&mut to_append);
+                Ok(list.len())
+            }
+        }
+    }
 }
 impl KvStore {
     pub fn new() -> Self {
         let data: ConcurrentHashMap = Arc::new(Mutex::new(Store::new()));
         return KvStore { db: data };
     }
-    pub fn get(&self, key: String) -> Option<String> {
+    pub fn get(&self, key: String) -> Option<RedisValue> {
         let mut store = self.db.lock().unwrap();
         let locked_ref = &store.kv;
 
@@ -125,11 +150,15 @@ impl KvStore {
             }
         }
         let new_stored_val = StoredVal {
-            val: new_value,
+            val: RedisValue::StringVal(new_value),
             expiry: expiry,
         };
         let mut locked_ref = self.db.lock().unwrap();
         locked_ref.insert(key, new_stored_val, expiry);
         Ok(())
+    }
+    pub fn rpush(&self, list_key: String, to_append: Vec<String>) -> Result<usize, RedisError> {
+        let mut locked_ref = self.db.lock().unwrap();
+        locked_ref.rpush(list_key, to_append)
     }
 }
