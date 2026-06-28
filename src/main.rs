@@ -150,6 +150,7 @@ async fn handle_connection(
                             "SET" => CommandType::SET,
                             "GET" => CommandType::GET,
                             "RPUSH" => CommandType::RPUSH,
+                            "LRANGE" => CommandType::LRANGE,
                             _ => {
                                 let e =
                                     RedisError::UnimplementedCommandType(parsed_command[0].clone());

@@ -89,6 +89,35 @@ impl Store {
             }
         }
     }
+    pub fn lrange(
+        &mut self,
+        list_key: String,
+        start: usize,
+        stop: usize,
+    ) -> Result<Vec<String>, RedisError> {
+        if start > stop {
+            return Ok(Vec::new());
+        }
+        let stored = match self.kv.get(&list_key) {
+            None => return Ok(Vec::new()),
+            Some(whole_list) => whole_list,
+        };
+        let RedisValue::ListVal(list) = &stored.val else {
+            return Err(RedisError::WrongType(format!(
+                "Key: {} exists in kv store but the value for the key is a String. LRANGE requires the value be a list",
+                list_key
+            )));
+        };
+        if start >= list.len() {
+            return Ok(Vec::new());
+        }
+        let stop_ = if stop >= list.len() {
+            list.len() - 1
+        } else {
+            stop
+        };
+        Ok(list.clone()[start..=stop_].to_vec())
+    }
 }
 impl KvStore {
     pub fn new() -> Self {
@@ -160,5 +189,14 @@ impl KvStore {
     pub fn rpush(&self, list_key: String, to_append: Vec<String>) -> Result<usize, RedisError> {
         let mut locked_ref = self.db.lock().unwrap();
         locked_ref.rpush(list_key, to_append)
+    }
+    pub fn lrange(
+        &self,
+        list_key: String,
+        start: usize,
+        stop: usize,
+    ) -> Result<Vec<String>, RedisError> {
+        let mut locked_ref = self.db.lock().unwrap();
+        locked_ref.lrange(list_key, start, stop)
     }
 }

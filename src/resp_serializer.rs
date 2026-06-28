@@ -20,6 +20,13 @@ fn resp_serializer(response: RedisResponse) -> String {
         RedisResponse::SimpleString(str) => format!("+{}\r\n", str),
         RedisResponse::BulkString(str) => format!("${}\r\n{}\r\n", str.len(), str),
         RedisResponse::NullBulkString => String::from("$-1\r\n"),
-        RedisResponse::Integer(int) => format!(":{}\r\n", int)
+        RedisResponse::Integer(int) => format!(":{}\r\n", int),
+        RedisResponse::BulkStringArray(vec) => {
+            let mut bulk_array = format!("*{}\r\n", vec.len());
+            for el in vec {
+                bulk_array.push_str(format!("${}\r\n{}\r\n", el.len(), el).as_str());
+            }
+            bulk_array
+        }
     }
 }

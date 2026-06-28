@@ -9,6 +9,7 @@ pub enum CommandType {
     SET,
     GET,
     RPUSH,
+    LRANGE,
 }
 #[derive(Clone)]
 pub struct Command {
@@ -20,6 +21,7 @@ pub enum RedisResponse {
     BulkString(String),
     NullBulkString,
     Integer(i32),
+    BulkStringArray(Vec<String>),
 }
 pub fn command_executor(command: Command, db: KvStore) -> Result<RedisResponse, RedisError> {
     let res = match command.command_name {
@@ -113,6 +115,38 @@ pub fn command_executor(command: Command, db: KvStore) -> Result<RedisResponse, 
                     cmd_name.to_string(),
                     0,
                     1,
+                ))?
+            }
+        }
+        CommandType::LRANGE => {
+            let cmd_name = command.command_args[0].clone();
+            if let (Some(list_key), Some(start_str), Some(stop_str)) = (
+                command.command_args.get(1),
+                command.command_args.get(2),
+                command.command_args.get(3),
+            ) {
+                let start = start_str.parse::<usize>().map_err(|_| {
+                    RedisError::WrongType(format!(
+                        "LRANGE command argument 2 (start): {} cannot be parsed as an integer",
+                        start_str
+                    ))
+                })?;
+                let stop = stop_str.parse::<usize>().map_err(|_| {
+                    RedisError::WrongType(format!(
+                        "LRANGE command arument 3 (stop): {} cannot be parsed as an integer",
+                        stop_str
+                    ))
+                })?;
+                let sliced_vec = match db.lrange(list_key.to_string(), start, stop) {
+                    Err(e) => return Err(e)?,
+                    Ok(response) => response,
+                };
+                RedisResponse::BulkStringArray(sliced_vec)
+            } else {
+                Err(RedisError::CommandMissingRequiredArguments(
+                    cmd_name,
+                    (command.command_args.len() - 1) as i32,
+                    3,
                 ))?
             }
         }
