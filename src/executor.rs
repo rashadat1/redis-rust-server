@@ -1,5 +1,5 @@
 use crate::{
-    data_store::{KvStore, RedisValue, SetOptionList, SetOptions},
+    data_store::{KvStore, PushType, RedisValue, SetOptionList, SetOptions},
     redis_error::RedisError,
 };
 #[derive(Clone)]
@@ -107,7 +107,7 @@ pub fn command_executor(command: Command, db: KvStore) -> Result<RedisResponse, 
                         break;
                     }
                 }
-                match db.push(list_key.to_string(), to_append) {
+                match db.push(list_key.to_string(), to_append, PushType::Right) {
                     Ok(len_list) => RedisResponse::Integer(len_list as i32),
                     Err(e) => Err(e)?,
                 }
@@ -171,8 +171,7 @@ pub fn command_executor(command: Command, db: KvStore) -> Result<RedisResponse, 
                     break;
                 }
             }
-            to_append.reverse();
-            match db.push(list_key.to_string(), to_append) {
+            match db.push(list_key.to_string(), to_append, PushType::Left) {
                 Ok(len_list) => RedisResponse::Integer(len_list as i32),
                 Err(e) => Err(e)?,
             }

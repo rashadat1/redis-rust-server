@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -13,7 +13,11 @@ pub struct StoredVal {
 #[derive(Clone)]
 pub enum RedisValue {
     StringVal(String),
-    ListVal(Vec<String>),
+    ListVal(VecDeque<String>),
+}
+pub enum PushType {
+    Left,
+    Right,
 }
 #[derive(Clone)]
 pub struct Store {
@@ -72,10 +76,11 @@ impl Store {
     pub fn push(
         &mut self,
         list_key: String,
-        mut to_append: Vec<String>,
+        to_append: Vec<String>,
+        push_type: PushType,
     ) -> Result<usize, RedisError> {
         let list_val = self.kv.entry(list_key.clone()).or_insert(StoredVal {
-            val: RedisValue::ListVal(Vec::new()),
+            val: RedisValue::ListVal(VecDeque::new()),
             expiry: None,
         });
         match &mut list_val.val {
@@ -84,7 +89,18 @@ impl Store {
                 list_key
             ))),
             RedisValue::ListVal(list) => {
-                list.append(&mut to_append);
+                match push_type {
+                    PushType::Left => {
+                        for el in to_append {
+                            list.push_front(el);
+                        }
+                    }
+                    PushType::Right => {
+                        for el in to_append {
+                            list.push_back(el);
+                        }
+                    }
+                }
                 Ok(list.len())
             }
         }
@@ -118,7 +134,7 @@ impl Store {
         } else {
             stop
         };
-        Ok(list.clone()[start..=stop_].to_vec())
+        Ok(list.range(start..=stop_).cloned().collect())
     }
 }
 impl KvStore {
@@ -188,9 +204,14 @@ impl KvStore {
         locked_ref.insert(key, new_stored_val, expiry);
         Ok(())
     }
-    pub fn push(&self, list_key: String, to_append: Vec<String>) -> Result<usize, RedisError> {
+    pub fn push(
+        &self,
+        list_key: String,
+        to_append: Vec<String>,
+        push_type: PushType,
+    ) -> Result<usize, RedisError> {
         let mut locked_ref = self.db.lock().unwrap();
-        locked_ref.push(list_key, to_append)
+        locked_ref.push(list_key, to_append, push_type)
     }
     pub fn lrange(
         &self,
@@ -200,6 +221,12 @@ impl KvStore {
     ) -> Result<Vec<String>, RedisError> {
         let mut locked_ref = self.db.lock().unwrap();
         locked_ref.lrange(list_key, start, stop)
+    }
+    pub fn llen(
+        &self,
+        list_key: String,
+    ) -> Result<usize, RedisError> {
+        let mut locked_ref = 
     }
 }
 fn normalize_lrange_indices(index: i32, cap: i32) -> usize {
