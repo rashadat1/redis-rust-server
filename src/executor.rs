@@ -1,3 +1,6 @@
+use core::f64;
+use std::usize;
+
 use crate::{
     data_store::{KvStore, PushType, RedisValue, SetOptionList, SetOptions},
     redis_error::RedisError,
@@ -11,6 +14,11 @@ pub enum CommandType {
     RPUSH,
     LRANGE,
     LPUSH,
+    LLEN,
+    LPOP,
+    BLPOP,
+    TYPE,
+    XADD,
 }
 #[derive(Clone)]
 pub struct Command {
@@ -23,8 +31,9 @@ pub enum RedisResponse {
     NullBulkString,
     Integer(i32),
     BulkStringArray(Vec<String>),
+    NullBulkArray,
 }
-pub fn command_executor(command: Command, db: KvStore) -> Result<RedisResponse, RedisError> {
+pub async fn command_executor(command: Command, db: KvStore) -> Result<RedisResponse, RedisError> {
     let res = match command.command_name {
         CommandType::PING => RedisResponse::SimpleString(String::from("PONG")),
         CommandType::ECHO => {
@@ -174,6 +183,98 @@ pub fn command_executor(command: Command, db: KvStore) -> Result<RedisResponse, 
             match db.push(list_key.to_string(), to_append, PushType::Left) {
                 Ok(len_list) => RedisResponse::Integer(len_list as i32),
                 Err(e) => Err(e)?,
+            }
+        }
+        CommandType::LLEN => {
+            let command_name = &command.command_args[0];
+            let list_key = match command.command_args.get(1) {
+                None => Err(RedisError::CommandMissingRequiredArguments(
+                    command_name.to_string(),
+                    (command.command_args.len() - 1) as i32,
+                    1,
+                ))?,
+                Some(str) => str,
+            };
+            let list_len = match db.llen(list_key.to_string()) {
+                Ok(val) => match val {
+                    None => 0,
+                    Some(val) => val,
+                },
+                Err(e) => Err(e)?,
+            };
+            RedisResponse::Integer(list_len as i32)
+        }
+        CommandType::LPOP => {
+            let command_name = &command.command_args[0];
+            if let Some(list_key) = command.command_args.get(1) {
+                let num = match command.command_args.get(2) {
+                    Some(to_parse) => {
+                        let parsed = to_parse.to_string().parse::<usize>().map_err(|_| RedisError::WrongType(format!("LPOP command argument 2 (num to pop): {} cannnot be parsed as an integer", to_parse)))?;
+                        parsed
+                    }
+                    None => 1,
+                };
+                let res = match db.lpop(list_key.to_string(), num) {
+                    Err(e) => Err(e)?,
+                    Ok(vec) => vec,
+                };
+                if res.len() <= 1 {
+                    RedisResponse::BulkString(res.get(0).unwrap_or(&String::from("")).to_string())
+                } else {
+                    RedisResponse::BulkStringArray(res)
+                }
+            } else {
+                Err(RedisError::CommandMissingRequiredArguments(
+                    command_name.to_string(),
+                    (command.command_args.len() - 1) as i32,
+                    1,
+                ))?
+            }
+        }
+        CommandType::BLPOP => {
+            let command_name = &command.command_args[0];
+            if let Some(list_key) = command.command_args.get(1) {
+                let time_end = match command.command_args.get(2) {
+                    Some(to_parse) => to_parse.parse::<f64>().map_err(|_| {
+                        RedisError::WrongType(format!(
+                            "BLPOP command argument 2 (timeout): {} cannot be parsed as a float",
+                            to_parse
+                        ))
+                    })?,
+                    None => Err(RedisError::CommandMissingRequiredArguments(
+                        command_name.to_string(),
+                        (command.command_args.len() - 1) as i32,
+                        2,
+                    ))?,
+                };
+                let res = match db.blpop(list_key.to_string(), time_end).await {
+                    Err(e) => Err(e)?,
+                    Ok(vec) => vec,
+                };
+                if res.len() > 0 {
+                    RedisResponse::BulkStringArray(res)
+                } else {
+                    RedisResponse::NullBulkArray
+                }
+            } else {
+                Err(RedisError::CommandMissingRequiredArguments(
+                    command_name.to_string(),
+                    (command.command_args.len() - 1) as i32,
+                    2,
+                ))?
+            }
+        }
+        CommandType::TYPE => {
+            let command_name = command.command_args[0].clone();
+            if let Some(key_name) = command.command_args.get(1) {
+                let type_val = db.get_type(key_name.to_string());
+                RedisResponse::SimpleString(type_val)
+            } else {
+                Err(RedisError::CommandMissingRequiredArguments(
+                    command_name.to_string(),
+                    (command.command_args.len() - 1) as i32,
+                    1,
+                ))?
             }
         }
     };

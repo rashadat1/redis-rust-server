@@ -6,6 +6,7 @@ mod parser;
 mod redis_error;
 mod resp_serializer;
 mod streams;
+
 use tokio::io::AsyncReadExt;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
@@ -152,6 +153,10 @@ async fn handle_connection(
                             "RPUSH" => CommandType::RPUSH,
                             "LRANGE" => CommandType::LRANGE,
                             "LPUSH" => CommandType::LPUSH,
+                            "LLEN" => CommandType::LLEN,
+                            "LPOP" => CommandType::LPOP,
+                            "BLPOP" => CommandType::BLPOP,
+                            "TYPE" => CommandType::TYPE,
                             _ => {
                                 let e =
                                     RedisError::UnimplementedCommandType(parsed_command[0].clone());
@@ -163,7 +168,7 @@ async fn handle_connection(
                             command_name: command_type,
                             command_args: parsed_command,
                         };
-                        match command_executor(command.clone(), db.clone()) {
+                        match command_executor(command.clone(), db.clone()).await {
                             Ok(response) => {
                                 let _ = command_responder(response, &mut socket).await;
                             }

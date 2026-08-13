@@ -28,5 +28,6 @@ fn resp_serializer(response: RedisResponse) -> String {
             }
             bulk_array
         }
+        RedisResponse::NullBulkArray => format!("*-1\r\n"),
     }
 }
