@@ -5,7 +5,7 @@ mod log;
 mod parser;
 mod redis_error;
 mod resp_serializer;
-
+mod streams;
 use tokio::io::AsyncReadExt;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
