@@ -11,7 +11,8 @@ pub enum RedisError {
     CommandMissingRequiredArguments(String, i32, i32),
     UnrecognizedCommandOption(String, String),
     InvalidArgumentForCommandOption(String, String, String, String),
-    WrongType(String)
+    WrongType(String),
+
 }
 
 impl fmt::Display for RedisError {

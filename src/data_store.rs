@@ -1,10 +1,10 @@
+use crate::redis_error::RedisError;
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, VecDeque, hash_map::Entry},
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
-
-use crate::redis_error::RedisError;
+use tokio::{sync::oneshot, time::timeout};
 #[derive(Clone)]
 pub struct StoredVal {
     pub val: RedisValue,
@@ -19,11 +19,15 @@ pub enum PushType {
     Left,
     Right,
 }
-#[derive(Clone)]
+pub struct BlpopData {
+    pub channel: oneshot::Sender<Vec<String>>,
+    pub deadline: Instant,
+}
 pub struct Store {
     pub kv: HashMap<String, StoredVal>,
     pub keys_with_expiry: Vec<(String, Instant)>,
     pub index_map: HashMap<String, usize>,
+    pub list_waiters: HashMap<String, VecDeque<BlpopData>>,
 }
 type ConcurrentHashMap = Arc<Mutex<Store>>;
 
@@ -41,10 +45,12 @@ impl Store {
         let kv: HashMap<String, StoredVal> = HashMap::new();
         let keys_with_expiry: Vec<(String, Instant)> = Vec::new();
         let index_map: HashMap<String, usize> = HashMap::new();
+        let list_waiters: HashMap<String, VecDeque<BlpopData>> = HashMap::new();
         return Store {
             kv,
             keys_with_expiry,
             index_map,
+            list_waiters,
         };
     }
     pub fn remove(&mut self, key: &String) {
@@ -83,27 +89,70 @@ impl Store {
             val: RedisValue::ListVal(VecDeque::new()),
             expiry: None,
         });
-        match &mut list_val.val {
+        let list = match &mut list_val.val {
             RedisValue::StringVal(_) => Err(RedisError::WrongType(format!(
                 "Key: {} already exists in kv store and the value for the key is a String. For existing keys, RPUSH requires the value be a list",
                 list_key
-            ))),
-            RedisValue::ListVal(list) => {
-                match push_type {
-                    PushType::Left => {
-                        for el in to_append {
-                            list.push_front(el);
+            )))?,
+            RedisValue::ListVal(lst) => lst,
+        };
+        let mut to_append_queue = VecDeque::from(to_append);
+        let len_to_append = to_append_queue.len().clone();
+        println!("Push command received");
+        println!("Append queue:");
+        for val in to_append_queue.clone() {
+            println!("{}", val);
+        }
+
+        loop {
+            if let Some(queued_waiters) = self.list_waiters.get_mut(list_key.as_str()) {
+                if to_append_queue.len() > 0 {
+                    let next_el = to_append_queue.pop_front().unwrap();
+
+                    let oldest_waiter = queued_waiters.pop_front();
+                    if oldest_waiter.is_some() {
+                        println!("Oldest waiter exists");
+                        let waiter_data = oldest_waiter.unwrap();
+                        let tx = waiter_data.channel;
+                        let mut res: Vec<String> = Vec::new();
+                        println!("Sending {} through channel to list waiter", next_el);
+                        res.push(list_key.clone());
+                        res.push(next_el);
+                        match tx.send(res) {
+                            Ok(()) => println!("send OK to waiter for {}", list_key),
+                            Err(returned) => println!(
+                                "send FAILED (receiver gone) for {}: {:?}",
+                                list_key, returned
+                            ),
                         }
+                    } else {
+                        // if there are no waiters for the push continue with the push from
+                        // to_append queue
+                        to_append_queue.push_front(next_el);
+                        break;
                     }
-                    PushType::Right => {
-                        for el in to_append {
-                            list.push_back(el);
-                        }
-                    }
+                } else {
+                    // if to_append_queue is empty from the pushes then we can break out
+                    return Ok(len_to_append);
                 }
-                Ok(list.len())
+            } else {
+                // if there are no list waiters for the list key
+                break;
             }
         }
+        match push_type {
+            PushType::Left => {
+                for el in to_append_queue {
+                    list.push_front(el);
+                }
+            }
+            PushType::Right => {
+                for el in to_append_queue {
+                    list.push_back(el);
+                }
+            }
+        }
+        Ok(list.len())
     }
     pub fn lrange(
         &mut self,
@@ -135,6 +184,52 @@ impl Store {
             stop
         };
         Ok(list.range(start..=stop_).cloned().collect())
+    }
+    pub fn lpop(&mut self, list_key: String, num_to_pop: usize) -> Result<Vec<String>, RedisError> {
+        let mut entry = match self.kv.entry(list_key.clone()) {
+            Entry::Occupied(entry) => entry,
+            Entry::Vacant(_) => return Ok(Vec::new()),
+        };
+        let stored_val = &mut entry.get_mut().val;
+        match stored_val {
+            RedisValue::StringVal(_) => {
+                return Err(RedisError::WrongType(format!(
+                    "Key: {} has type String which is not compatible with LPOP command which expects the value stored with this key to be a list",
+                    list_key,
+                )));
+            }
+            RedisValue::ListVal(deque) => {
+                let mut res: Vec<String> = Vec::new();
+                let num_take = if deque.len() < num_to_pop {
+                    deque.len()
+                } else {
+                    num_to_pop
+                };
+                for _ in 0..num_take {
+                    res.push(deque.pop_front().unwrap());
+                }
+                Ok(res)
+            }
+        }
+    }
+    pub fn register_waiter(
+        &mut self,
+        list_key: String,
+        timeout: f64,
+    ) -> oneshot::Receiver<Vec<String>> {
+        let deadline = Instant::now() + Duration::from_secs_f64(timeout);
+        let (tx, mut rx): (oneshot::Sender<Vec<String>>, oneshot::Receiver<Vec<String>>) =
+            oneshot::channel();
+        let data = BlpopData {
+            channel: tx,
+            deadline,
+        };
+        let list_waiter_entry = self
+            .list_waiters
+            .entry(list_key.clone())
+            .or_insert(VecDeque::new());
+        list_waiter_entry.push_back(data);
+        rx
     }
 }
 impl KvStore {
@@ -222,11 +317,68 @@ impl KvStore {
         let mut locked_ref = self.db.lock().unwrap();
         locked_ref.lrange(list_key, start, stop)
     }
-    pub fn llen(
-        &self,
-        list_key: String,
-    ) -> Result<usize, RedisError> {
-        let mut locked_ref = 
+    pub fn llen(&self, list_key: String) -> Result<Option<usize>, RedisError> {
+        let stored_val = match self.get(list_key.clone()) {
+            None => return Ok(None),
+            Some(val) => val,
+        };
+        let result = match stored_val {
+            RedisValue::StringVal(_) => Err(RedisError::WrongType(format!(
+                "Key: {} has type String which is not compatible with LLEN command which expects the value stored with this key to be a list",
+                list_key
+            )))?,
+            RedisValue::ListVal(lst) => lst.len(),
+        };
+        Ok(Some(result))
+    }
+    pub fn lpop(&self, list_key: String, num_to_pop: usize) -> Result<Vec<String>, RedisError> {
+        let mut locked_ref = self.db.lock().unwrap();
+        locked_ref.lpop(list_key, num_to_pop)
+    }
+    pub async fn blpop(&self, list_key: String, time_stop: f64) -> Result<Vec<String>, RedisError> {
+        let mut rx = {
+            let mut locked_ref = self.db.lock().unwrap();
+            let option_el = match locked_ref.lpop(list_key.clone(), 1) {
+                Ok(v) => v.into_iter().next(),
+                Err(e) => Err(e)?,
+            };
+            match option_el {
+                Some(x) => return Ok(vec![list_key.to_string(), x]),
+                None => locked_ref.register_waiter(list_key.clone(), time_stop),
+            }
+        };
+        println!("Got rx now waiting for pushes to list key: {}", list_key);
+        if time_stop != 0.0 {
+            match timeout(Duration::from_secs_f64(time_stop), &mut rx).await {
+                Ok(v) => match v {
+                    Ok(lpop_res) => return Ok(lpop_res),
+                    Err(_) => Err(RedisError::IoError(std::io::Error::other(
+                        "Receiver dropped for BLPOP operation",
+                    ))),
+                },
+                Err(e) => {
+                    println!("Nothing received by receiver in one-shot channel");
+                    return Ok(Vec::new());
+                }
+            }
+        } else {
+            match rx.await {
+                Ok(v) => return Ok(v),
+                Err(_) => Err(RedisError::IoError(std::io::Error::other(
+                    "Receiver dropped for BLPOP operation",
+                ))),
+            }
+        }
+    }
+    pub fn get_type(self, key_name: String) -> String {
+        let val = self.get(key_name);
+        if val.is_none() {
+            return "none".to_string();
+        }
+        match val.unwrap() {
+            RedisValue::StringVal(_) => return "string".to_string(),
+            RedisValue::ListVal(_) => return "list".to_string(),
+        }
     }
 }
 fn normalize_lrange_indices(index: i32, cap: i32) -> usize {
