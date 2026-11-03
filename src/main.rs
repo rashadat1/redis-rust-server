@@ -14,7 +14,7 @@ use tokio::sync::mpsc;
 use crate::key_recycler::key_recycler;
 use crate::log::init_logger;
 use crate::parser::parse_resp_array;
-use crate::redis_error::RedisError;
+use crate::redis_error::RedisParseError;
 use crate::{
     data_store::KvStore,
     executor::{Command, CommandType, command_executor},
@@ -83,14 +83,14 @@ async fn handle_connection(
     mut socket: TcpStream,
     tx: &mut mpsc::Sender<String>,
     db: KvStore,
-) -> Result<(), RedisError> {
+) -> Result<(), RedisParseError> {
     let mut read_buf = vec![0u8; 1024];
     let mut accumulator: Vec<u8> = Vec::new();
     loop {
         let n = socket
             .read(&mut read_buf)
             .await
-            .map_err(|e| RedisError::IoError(e))?;
+            .map_err(|e| RedisParseError::IoError(e))?;
         println!("Read {} bytes from the stream", n);
         if n == 0 {
             break;
@@ -110,7 +110,7 @@ async fn handle_connection(
                 curr += 1;
                 let result = parse_resp_array(&mut accumulator, &mut curr);
                 match result {
-                    Err(RedisError::OutOfBytes(str, msg)) => {
+                    Err(RedisParseError::OutOfBytes(str, msg)) => {
                         if let Some(msg_) = msg {
                             tx.send(format!(
                                 "{}: Read the following bytes as a string: {}",
@@ -131,7 +131,7 @@ async fn handle_connection(
                     Ok(parsed_command) => {
                         accumulator.clear();
                         if let None = parsed_command.get(0) {
-                            Err(RedisError::MalformedRequest(
+                            Err(RedisParseError::MalformedRequest(
                                 0,
                                 String::from_utf8_lossy(&accumulator[..accumulator.len()])
                                     .to_string(),
@@ -157,9 +157,10 @@ async fn handle_connection(
                             "LPOP" => CommandType::LPOP,
                             "BLPOP" => CommandType::BLPOP,
                             "TYPE" => CommandType::TYPE,
+                            "XADD" => CommandType::XADD,
                             _ => {
                                 let e =
-                                    RedisError::UnimplementedCommandType(parsed_command[0].clone());
+                                    RedisParseError::UnimplementedCommandType(parsed_command[0].clone());
                                 tx.send(format!("{}", e)).await.unwrap_or_default();
                                 Err(e.into())?
                             }
@@ -181,7 +182,7 @@ async fn handle_connection(
                 }
             }
             _ => {
-                let e = RedisError::UnknownRESPDataType(
+                let e = RedisParseError::UnknownRESPDataType(
                     0,
                     String::from_utf8_lossy(&accumulator[..n]).to_string(),
                     Some(

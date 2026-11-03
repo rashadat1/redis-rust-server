@@ -1,9 +1,9 @@
-use crate::redis_error::RedisError;
+use crate::redis_error::RedisParseError;
 
 pub fn parse_resp_array(
     accumulator: &mut Vec<u8>,
     pos: &mut usize,
-) -> Result<Vec<String>, RedisError> {
+) -> Result<Vec<String>, RedisParseError> {
     let mut command_args: Vec<String> = Vec::new();
     let initial_position = *pos; // copy the position into another variable
     loop {
@@ -16,7 +16,7 @@ pub fn parse_resp_array(
             }
             *pos += 1;
         } else {
-            Err(RedisError::OutOfBytes(
+            Err(RedisParseError::OutOfBytes(
                 String::from_utf8_lossy(&accumulator[..]).to_string(),
                 Some(
                     "Out of Bytes Error: Reached end of command read from buffer before hitting a terminal CRLF, will try to read more bytes".to_string(),
@@ -26,7 +26,7 @@ pub fn parse_resp_array(
     }
     let num_element_bytes = &accumulator[initial_position..=*pos];
     let num_elements_string = str::from_utf8(&num_element_bytes).map_err(|_| {
-        RedisError::MalformedRequest(
+        RedisParseError::MalformedRequest(
             *pos as i32,
             String::from_utf8_lossy(&accumulator).to_string(),
             Some("Malformed Request Error: Invalid UTF8 string encoded by bytes representing number of elements in RESP array".to_string()),
@@ -34,7 +34,7 @@ pub fn parse_resp_array(
     })?;
     let num_elements = num_elements_string
         .parse::<usize>()
-        .map_err(|_| RedisError::InvalidInteger(String::from_utf8_lossy(&accumulator[..accumulator.len()]).to_string(), num_elements_string.to_string(), Some("Invalid Integer Error: Expected an integer but received non-integer string in place denoting number of elements in RESP array".to_string())))?;
+        .map_err(|_| RedisParseError::InvalidInteger(String::from_utf8_lossy(&accumulator[..accumulator.len()]).to_string(), num_elements_string.to_string(), Some("Invalid Integer Error: Expected an integer but received non-integer string in place denoting number of elements in RESP array".to_string())))?;
 
     *pos += 3;
     for i in 0..num_elements {
@@ -50,14 +50,14 @@ pub fn parse_resp_array(
                         command_args.push(bulk_string);
                     }
                 }
-                _ => Err(RedisError::UnknownRESPDataType(
+                _ => Err(RedisParseError::UnknownRESPDataType(
                     *pos as i32,
                     String::from_utf8_lossy(&accumulator[initial_position..=*pos]).to_string(),
                     Some("Unknown RESP Data Type Error: RESP array contains an array element of invalid data type".to_string())
                 ))?,
             };
         } else {
-            Err(RedisError::OutOfBytes(
+            Err(RedisParseError::OutOfBytes(
                 String::from_utf8_lossy(&accumulator[..accumulator.len()]).to_string(),
                 Some(format!(
                     "Out of Bytes Error: Reached end of bytes read from buffer into accumulator before processing expected number of RESP array elements ({})",
@@ -68,7 +68,7 @@ pub fn parse_resp_array(
     }
     Ok(command_args)
 }
-pub fn parse_bulk_string(accumulator: &mut Vec<u8>, pos: &mut usize) -> Result<String, RedisError> {
+pub fn parse_bulk_string(accumulator: &mut Vec<u8>, pos: &mut usize) -> Result<String, RedisParseError> {
     let current_position = *pos;
     loop {
         if let (Some(next), Some(next_next)) =
@@ -79,7 +79,7 @@ pub fn parse_bulk_string(accumulator: &mut Vec<u8>, pos: &mut usize) -> Result<S
             }
             *pos += 1;
         } else {
-            Err(RedisError::OutOfBytes(
+            Err(RedisParseError::OutOfBytes(
                 String::from_utf8_lossy(&accumulator[..]).to_string(),
                 Some(
                     "Out of Bytes Error: Reached end of command read from buffer before hitting a terminal CRLF, will try to read more bytes".to_string(),
@@ -88,7 +88,7 @@ pub fn parse_bulk_string(accumulator: &mut Vec<u8>, pos: &mut usize) -> Result<S
     }
     let string_length_bytes = &accumulator[current_position..=*pos];
     let string_length_string = str::from_utf8(string_length_bytes).map_err(|_| {
-        RedisError::MalformedRequest(
+        RedisParseError::MalformedRequest(
             *pos as i32,
             String::from_utf8_lossy(string_length_bytes).to_string(),
             Some("Malformed Request Error: Invalid UTF8 string encoded by bytes representing number of elements in RESP bulk string".to_string()),
@@ -96,11 +96,11 @@ pub fn parse_bulk_string(accumulator: &mut Vec<u8>, pos: &mut usize) -> Result<S
     })?;
     let string_length = string_length_string
         .parse::<usize>()
-        .map_err(|_| RedisError::InvalidInteger(String::from_utf8_lossy(&accumulator[..accumulator.len()]).to_string(), string_length_string.to_string(), Some("Invalid Integer Error: Expected an integer but received non-integer string in place denoting number of elements in RESP bulk string".to_string())))?;
+        .map_err(|_| RedisParseError::InvalidInteger(String::from_utf8_lossy(&accumulator[..accumulator.len()]).to_string(), string_length_string.to_string(), Some("Invalid Integer Error: Expected an integer but received non-integer string in place denoting number of elements in RESP bulk string".to_string())))?;
 
     *pos += 3; // $4\r\nbark\r\n
     let bulk_string = str::from_utf8(&accumulator[*pos..(*pos + string_length)]).map_err(|_| {
-        RedisError::MalformedRequest(
+        RedisParseError::MalformedRequest(
             *pos as i32,
             String::from_utf8_lossy(&accumulator[*pos..(*pos + string_length)]).to_string(),
             Some("Malformed Request Error: Invalid UTF8 string encoded by bytes representing RESP bulk string".to_string()),

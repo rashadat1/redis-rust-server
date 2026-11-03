@@ -19,6 +19,8 @@ impl StreamNode {
         };
     }
 }
+#[derive(Clone)]
+
 pub struct Stream {
     pub root: StreamNode,
     pub last_id: String,

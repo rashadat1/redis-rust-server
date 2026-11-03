@@ -1,6 +1,12 @@
 use std::fmt;
 #[derive(Debug)]
+
 pub enum RedisError {
+    Parse(RedisParseError),
+    StreamInsert(RedisStreamInsertError),
+}
+#[derive(Debug)]
+pub enum RedisParseError {
     IoError(std::io::Error),
     UnknownRESPDataType(i32, String, Option<String>),
     MalformedRequest(i32, String, Option<String>),
@@ -12,30 +18,28 @@ pub enum RedisError {
     UnrecognizedCommandOption(String, String),
     InvalidArgumentForCommandOption(String, String, String, String),
     WrongType(String),
-
 }
-
-impl fmt::Display for RedisError {
+impl fmt::Display for RedisParseError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            RedisError::IoError(e) => {
+            RedisParseError::IoError(e) => {
                 write!(f, "{}", e)
             }
-            RedisError::UnknownRESPDataType(pos, str, msg) => {
+            RedisParseError::UnknownRESPDataType(pos, str, msg) => {
                 if let Some(msg_) = msg {
                     write!(f, "{} in: {} at {}", msg_, str, pos)
                 } else {
                     write!(f, "Unknown RESP data type at position {} in: {}", pos, str)
                 }
             }
-            RedisError::MalformedRequest(pos, str, msg) => {
+            RedisParseError::MalformedRequest(pos, str, msg) => {
                 if let Some(msg_) = msg {
                     write!(f, "{} in: {} at {}", msg_, str, pos)
                 } else {
                     write!(f, "Malformed RESP request at position {} in: {}", pos, str)
                 }
             }
-            RedisError::InvalidInteger(str, error_loc, msg) => {
+            RedisParseError::InvalidInteger(str, error_loc, msg) => {
                 if let Some(msg_) = msg {
                     write!(f, "{} at: {} in {}", msg_, error_loc, str)
                 } else {
@@ -46,7 +50,7 @@ impl fmt::Display for RedisError {
                     )
                 }
             }
-            RedisError::OutOfBytes(str, msg) => {
+            RedisParseError::OutOfBytes(str, msg) => {
                 if let Some(msg_) = msg {
                     write!(f, "{}: As a string, the bytes read were: {}", msg_, str)
                 } else {
@@ -57,35 +61,56 @@ impl fmt::Display for RedisError {
                     )
                 }
             }
-            RedisError::UnimplementedCommandType(str) => {
+            RedisParseError::UnimplementedCommandType(str) => {
                 write!(f, "Received Unimplemented RESP command: {}", str)
             }
-            RedisError::MissingArumentForOption(cmd, option) => {
+            RedisParseError::MissingArumentForOption(cmd, option) => {
                 write!(
                     f,
                     "{} command has option {} specified but is missing a value for this option",
                     cmd, option
                 )
             }
-            RedisError::CommandMissingRequiredArguments(cmd, got, expect) => {
+            RedisParseError::CommandMissingRequiredArguments(cmd, got, expect) => {
                 write!(
                     f,
                     "{} command received {} argument(s) but expected {} argument(s)",
                     cmd, got, expect
                 )
             }
-            RedisError::UnrecognizedCommandOption(cmd, option) => {
+            RedisParseError::UnrecognizedCommandOption(cmd, option) => {
                 write!(f, "{} command received unrecognized option {}", cmd, option)
             }
-            RedisError::InvalidArgumentForCommandOption(cmd, option, got, expected_type) => {
+            RedisParseError::InvalidArgumentForCommandOption(cmd, option, got, expected_type) => {
                 write!(
                     f,
                     "{} command option {} expects an {} got value: {} which cannot be parsed as an {}",
                     cmd, option, expected_type, got, expected_type
                 )
             }
-            RedisError::WrongType(msg) => {
+            RedisParseError::WrongType(msg) => {
                 write!(f, "{}", msg)
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+
+pub enum RedisStreamInsertError {
+    StreamIdTooOld(String, String, String),
+    InvalidStreamId(String),
+}
+impl fmt::Display for RedisStreamInsertError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            RedisStreamInsertError::StreamIdTooOld(to_insert_id, last_id, stream_key) => {
+                write!(f, "{} cannot be inserted because it's timestamp or seq number is earlier than {}, the last inserted id of the stream with key {}",
+                    to_insert_id, last_id, stream_key
+                )
+            }
+            RedisStreamInsertError::InvalidStreamId(to_insert_id) => {
+                write!(f, "Invalid insert id for a stream {}", to_insert_id)
             }
         }
     }

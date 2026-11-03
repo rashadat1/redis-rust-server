@@ -1,17 +1,17 @@
-use crate::{executor::RedisResponse, redis_error::RedisError};
+use crate::{executor::RedisResponse, redis_error::RedisParseError};
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 
 pub async fn command_responder(
     response: RedisResponse,
     socket: &mut TcpStream,
-) -> Result<(), RedisError> {
+) -> Result<(), RedisParseError> {
     let serialized_response = resp_serializer(response);
     let response_bytes = serialized_response.as_bytes();
     socket
         .write(response_bytes)
         .await
-        .map_err(|e| RedisError::IoError(e))?;
+        .map_err(|e| RedisParseError::IoError(e))?;
     println!("Wrote {} bytes to the stream", response_bytes.len());
     Ok(())
 }
@@ -29,5 +29,6 @@ fn resp_serializer(response: RedisResponse) -> String {
             bulk_array
         }
         RedisResponse::NullBulkArray => format!("*-1\r\n"),
+        RedisResponse::SimpleError(msg) => format!("-ERR {}\r\n", msg),
     }
 }

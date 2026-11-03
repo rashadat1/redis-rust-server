@@ -1,8 +1,6 @@
-use crate::redis_error::RedisError;
+use crate::{redis_error::{RedisError::{self, Parse, StreamInsert}, RedisParseError, RedisStreamInsertError}, streams::Stream};
 use std::{
-    collections::{HashMap, VecDeque, hash_map::Entry},
-    sync::{Arc, Mutex},
-    time::{Duration, Instant},
+    collections::{HashMap, VecDeque, hash_map::Entry}, sync::{Arc, Mutex}, time::{Duration, Instant},
 };
 use tokio::{sync::oneshot, time::timeout};
 #[derive(Clone)]
@@ -14,6 +12,7 @@ pub struct StoredVal {
 pub enum RedisValue {
     StringVal(String),
     ListVal(VecDeque<String>),
+    StreamVal(Stream),
 }
 pub enum PushType {
     Left,
@@ -84,17 +83,17 @@ impl Store {
         list_key: String,
         to_append: Vec<String>,
         push_type: PushType,
-    ) -> Result<usize, RedisError> {
+    ) -> Result<usize, RedisParseError> {
         let list_val = self.kv.entry(list_key.clone()).or_insert(StoredVal {
             val: RedisValue::ListVal(VecDeque::new()),
             expiry: None,
         });
         let list = match &mut list_val.val {
-            RedisValue::StringVal(_) => Err(RedisError::WrongType(format!(
-                "Key: {} already exists in kv store and the value for the key is a String. For existing keys, RPUSH requires the value be a list",
-                list_key
-            )))?,
             RedisValue::ListVal(lst) => lst,
+            _ => Err(RedisParseError::WrongType(format!(
+                "Key: {} already exists in kv store and the value for the key is not compatible with this operation `RPUSH` / `LPUSH` which requires the value to be a list",
+                list_key
+            )))?
         };
         let mut to_append_queue = VecDeque::from(to_append);
         let len_to_append = to_append_queue.len().clone();
@@ -159,14 +158,14 @@ impl Store {
         list_key: String,
         start_: i32,
         stop_: i32,
-    ) -> Result<Vec<String>, RedisError> {
+    ) -> Result<Vec<String>, RedisParseError> {
         let stored = match self.kv.get(&list_key) {
             None => return Ok(Vec::new()),
             Some(whole_list) => whole_list,
         };
         let RedisValue::ListVal(list) = &stored.val else {
-            return Err(RedisError::WrongType(format!(
-                "Key: {} exists in kv store but the value for the key is a String. LRANGE requires the value be a list",
+            return Err(RedisParseError::WrongType(format!(
+                "Key: {} already exists in kv store and the value for the key is not compatible with this operation `LRANGE` which requires the value to be a list",
                 list_key
             )));
         };
@@ -185,19 +184,13 @@ impl Store {
         };
         Ok(list.range(start..=stop_).cloned().collect())
     }
-    pub fn lpop(&mut self, list_key: String, num_to_pop: usize) -> Result<Vec<String>, RedisError> {
+    pub fn lpop(&mut self, list_key: String, num_to_pop: usize) -> Result<Vec<String>, RedisParseError> {
         let mut entry = match self.kv.entry(list_key.clone()) {
             Entry::Occupied(entry) => entry,
             Entry::Vacant(_) => return Ok(Vec::new()),
         };
         let stored_val = &mut entry.get_mut().val;
         match stored_val {
-            RedisValue::StringVal(_) => {
-                return Err(RedisError::WrongType(format!(
-                    "Key: {} has type String which is not compatible with LPOP command which expects the value stored with this key to be a list",
-                    list_key,
-                )));
-            }
             RedisValue::ListVal(deque) => {
                 let mut res: Vec<String> = Vec::new();
                 let num_take = if deque.len() < num_to_pop {
@@ -210,6 +203,10 @@ impl Store {
                 }
                 Ok(res)
             }
+            _ => return Err(RedisParseError::WrongType(format!(
+                "Key: {} already exists in kv store and the value for the key is not compatible with this operation `LPOP` which requires the value to be a list",
+                list_key,
+            )))
         }
     }
     pub fn register_waiter(
@@ -218,7 +215,7 @@ impl Store {
         timeout: f64,
     ) -> oneshot::Receiver<Vec<String>> {
         let deadline = Instant::now() + Duration::from_secs_f64(timeout);
-        let (tx, mut rx): (oneshot::Sender<Vec<String>>, oneshot::Receiver<Vec<String>>) =
+        let (tx, rx): (oneshot::Sender<Vec<String>>, oneshot::Receiver<Vec<String>>) =
             oneshot::channel();
         let data = BlpopData {
             channel: tx,
@@ -259,14 +256,14 @@ impl KvStore {
         key: String,
         new_value: String,
         options: Option<SetOptionList>,
-    ) -> Result<(), RedisError> {
+    ) -> Result<(), RedisParseError> {
         let mut expiry: Option<Instant> = None;
         if let Some(opts) = options {
             for opt in opts {
                 match opt {
                     SetOptions::EX(arg) => {
                         let timeout = arg.parse::<u64>().map_err(|_| {
-                            RedisError::InvalidArgumentForCommandOption(
+                            RedisParseError::InvalidArgumentForCommandOption(
                                 "SET".to_string(),
                                 "EX".to_string(),
                                 "Integer".to_string(),
@@ -278,7 +275,7 @@ impl KvStore {
                     }
                     SetOptions::PX(arg) => {
                         let timeout = arg.parse::<u64>().map_err(|_| {
-                            RedisError::InvalidArgumentForCommandOption(
+                            RedisParseError::InvalidArgumentForCommandOption(
                                 "SET".to_string(),
                                 "PX".to_string(),
                                 "Integer".to_string(),
@@ -304,7 +301,7 @@ impl KvStore {
         list_key: String,
         to_append: Vec<String>,
         push_type: PushType,
-    ) -> Result<usize, RedisError> {
+    ) -> Result<usize, RedisParseError> {
         let mut locked_ref = self.db.lock().unwrap();
         locked_ref.push(list_key, to_append, push_type)
     }
@@ -313,29 +310,29 @@ impl KvStore {
         list_key: String,
         start: i32,
         stop: i32,
-    ) -> Result<Vec<String>, RedisError> {
+    ) -> Result<Vec<String>, RedisParseError> {
         let mut locked_ref = self.db.lock().unwrap();
         locked_ref.lrange(list_key, start, stop)
     }
-    pub fn llen(&self, list_key: String) -> Result<Option<usize>, RedisError> {
+    pub fn llen(&self, list_key: String) -> Result<Option<usize>, RedisParseError> {
         let stored_val = match self.get(list_key.clone()) {
             None => return Ok(None),
             Some(val) => val,
         };
         let result = match stored_val {
-            RedisValue::StringVal(_) => Err(RedisError::WrongType(format!(
-                "Key: {} has type String which is not compatible with LLEN command which expects the value stored with this key to be a list",
-                list_key
-            )))?,
             RedisValue::ListVal(lst) => lst.len(),
+            _ => return Err(RedisParseError::WrongType(format!(
+                "Key: {} already exists in kv store and the value for the key is not compatible with this operation `LLEN` which requires the value to be a list",
+                list_key,
+            )))
         };
         Ok(Some(result))
     }
-    pub fn lpop(&self, list_key: String, num_to_pop: usize) -> Result<Vec<String>, RedisError> {
+    pub fn lpop(&self, list_key: String, num_to_pop: usize) -> Result<Vec<String>, RedisParseError> {
         let mut locked_ref = self.db.lock().unwrap();
         locked_ref.lpop(list_key, num_to_pop)
     }
-    pub async fn blpop(&self, list_key: String, time_stop: f64) -> Result<Vec<String>, RedisError> {
+    pub async fn blpop(&self, list_key: String, time_stop: f64) -> Result<Vec<String>, RedisParseError> {
         let mut rx = {
             let mut locked_ref = self.db.lock().unwrap();
             let option_el = match locked_ref.lpop(list_key.clone(), 1) {
@@ -352,11 +349,11 @@ impl KvStore {
             match timeout(Duration::from_secs_f64(time_stop), &mut rx).await {
                 Ok(v) => match v {
                     Ok(lpop_res) => return Ok(lpop_res),
-                    Err(_) => Err(RedisError::IoError(std::io::Error::other(
+                    Err(_) => Err(RedisParseError::IoError(std::io::Error::other(
                         "Receiver dropped for BLPOP operation",
                     ))),
                 },
-                Err(e) => {
+                Err(_e) => {
                     println!("Nothing received by receiver in one-shot channel");
                     return Ok(Vec::new());
                 }
@@ -364,12 +361,44 @@ impl KvStore {
         } else {
             match rx.await {
                 Ok(v) => return Ok(v),
-                Err(_) => Err(RedisError::IoError(std::io::Error::other(
+                Err(_) => Err(RedisParseError::IoError(std::io::Error::other(
                     "Receiver dropped for BLPOP operation",
                 ))),
             }
         }
     }
+    pub fn xadd(self, stream_name: String, node_id: String, data: HashMap<String, String>) -> Result<String, RedisError> {
+        let mut db = self.db.lock().unwrap();
+        let store = &mut db.kv;
+
+        let default = StoredVal{
+            val: RedisValue::StreamVal(Stream::new()),
+            expiry: None,
+        };
+        let stored_val = store.entry(stream_name.clone()).or_insert(default);
+        let stored_stream = match &mut stored_val.val {
+            RedisValue::StreamVal(stream_val) => stream_val,
+            _ => return Err(Parse(RedisParseError::WrongType(format!(
+                "Key: {} already exists in kv store and the value for the key is not compatible with this operation `XADD` which requires the value to be a stream",
+                stream_name,
+            ))))
+        };
+        if !is_valid_id(&node_id) {
+            return Err(StreamInsert(RedisStreamInsertError::InvalidStreamId(node_id)));
+        }
+        // insert id is now of the correct form * or [/d]+-* or [/d]+-[/d]
+
+        // insert id after we have replaced the * in the whole id or * in the sequence number
+        let to_insert_id = autogenerate_id(&node_id, &stored_stream);
+        if after_last_id(&stored_stream, &to_insert_id) {
+            stored_stream.insert(to_insert_id, Some(data));
+            return Ok(stored_stream.last_id.clone());
+        } else {
+            return Err(StreamInsert(RedisStreamInsertError::StreamIdTooOld(to_insert_id, stored_stream.last_id.clone(), stream_name)));
+        }
+    }
+
+    
     pub fn get_type(self, key_name: String) -> String {
         let val = self.get(key_name);
         if val.is_none() {
@@ -378,6 +407,7 @@ impl KvStore {
         match val.unwrap() {
             RedisValue::StringVal(_) => return "string".to_string(),
             RedisValue::ListVal(_) => return "list".to_string(),
+            RedisValue::StreamVal(_) => return "stream".to_string(),
         }
     }
 }
@@ -389,4 +419,71 @@ fn normalize_lrange_indices(index: i32, cap: i32) -> usize {
     } else {
         (index + cap) as usize
     };
+}
+fn autogenerate_id(insert_id: &String, stream: &Stream) -> String {
+    let last_id = &stream.last_id;
+    if !insert_id.contains("*") {
+        return insert_id.clone();
+    }
+    let last_id_parts: Vec<&str> = last_id.split('-').collect();
+    let last_milli_time = last_id_parts.get(0).unwrap();
+    let seq_number = last_id_parts.get(1).unwrap().parse::<u32>().unwrap();
+    if insert_id.chars().nth(0).unwrap() == '*' {
+       // entire id is autogenerated 
+        return format!("{}-{}", last_milli_time, seq_number+1);  
+    } else {
+        // it ends with the * so only the sequence number is autogenerated
+        
+        let insert_id_parts: Vec<&str> = insert_id.split('-').collect();
+        if last_milli_time == insert_id_parts.get(0).unwrap() {
+            return format!("{}-{}", last_milli_time, seq_number+1);
+        } else {
+            return format!("{}-{}", insert_id_parts.get(0).unwrap(), 0);
+        }
+    }
+}
+fn after_last_id(stream: &Stream, insert_id: &String) -> bool {
+    let last_id = &stream.last_id;
+    let last_id_parts: Vec<&str> = last_id.split('-').collect();
+    let last_milli_time = last_id_parts.get(0).unwrap().parse::<u64>().unwrap();
+    let seq_number: u32 = last_id_parts.get(1).unwrap().parse::<u32>().unwrap();
+
+    let insert_id_parts: Vec<&str> = insert_id.split('-').collect();
+    let insert_id_milli_time: u64 = insert_id_parts.get(0).unwrap().parse::<u64>().unwrap();
+    let insert_id_seq_number: u32 = insert_id_parts.get(1).unwrap().parse::<u32>().unwrap();
+
+    if insert_id_milli_time > last_milli_time {
+        return true;
+    } else if insert_id_milli_time == last_milli_time && insert_id_seq_number > seq_number {
+        return true;
+    } else {
+        return false;
+    }
+}
+fn is_valid_id(insert_id: &String) -> bool {
+    if insert_id.starts_with("*") {
+        if insert_id.len() != 1 {
+            return false;
+        }
+    }
+    let id_parts: Vec<&str> = insert_id.split("-").collect();
+    if id_parts.len() != 2 {
+        return false;
+    }
+    for ch in id_parts[0].chars() {
+        if !ch.is_ascii_digit() {
+            return false;
+        }
+    }
+    if id_parts[1] == "*" {
+        return true;
+    }
+    for ch in id_parts[1].chars() {
+        if !ch.is_ascii_digit() {
+            return false;
+        }
+    }
+    return true;
+
+
 }
